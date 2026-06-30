@@ -1,0 +1,108 @@
+import streamlit as st
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
+from langchain_classic.chains.question_answering import load_qa_chain 
+from langchain_ollama import OllamaLLM
+
+#Upload Files
+st.header(":green[_SalaryBot_]", divider="violet")
+
+#Sidebar
+with st.sidebar:
+    st.title("Documents Upload")
+    file = st.file_uploader("Upload your documents here", type=["pdf", "docx", "txt", "xlsx"], accept_multiple_files=True)
+
+# CHANGE 1: this list will collect chunks from ALL uploaded files,
+# instead of only keeping the last file's chunks (that was a bug)
+all_chunks = []
+
+#Extract text from uploaded files
+if file:
+    for uploaded_file in file:
+        text = ""
+
+        if uploaded_file.type == "application/pdf":
+            import PyPDF2
+            pdf_reader = PyPDF2.PdfReader(uploaded_file)
+            for page in pdf_reader.pages:
+                text += page.extract_text() or ""
+
+        elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+            import docx
+            doc = docx.Document(uploaded_file)
+            for para in doc.paragraphs:
+                text += para.text + "\n"
+
+        elif uploaded_file.type == "text/plain":
+            text = uploaded_file.read().decode("utf-8")
+
+        elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+            import pandas as pd
+            df = pd.read_excel(uploaded_file)
+            text = df.to_string(index=False)
+
+        else:
+            st.warning(f"Unsupported file type: {uploaded_file.type}")
+            continue
+
+        #Break file into sizable chunks
+        text_splitter = RecursiveCharacterTextSplitter(
+            separators=["\n"],
+            chunk_size=500,
+            chunk_overlap=150,
+            length_function=len
+        )
+        chunks = text_splitter.split_text(text)
+
+        # CHANGE 1 (continued): add this file's chunks to the big list
+        # instead of overwriting "chunks" every loop
+        all_chunks.extend(chunks)
+
+# Generating Embeddings
+    try:
+        from langchain_huggingface import HuggingFaceEmbeddings
+    except ImportError:
+        st.error("Install free local embeddings with: pip install langchain-huggingface sentence-transformers")
+        st.stop()
+
+    # CHANGE 2: only build the embeddings model and vector store ONCE,
+    # and save them in st.session_state so the app doesn't redo this
+    # slow step every single time you ask a question
+    if "vector_store" not in st.session_state:
+        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        st.session_state.vector_store = FAISS.from_texts(all_chunks, embeddings)
+
+    vector_store = st.session_state.vector_store
+
+    # CHANGE 3: keep a running chat history instead of just one Q and one A
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+
+    # show all previous messages like a real chat app
+    for role, message in st.session_state.chat_history:
+        with st.chat_message(role):
+            st.write(message)
+
+    # CHANGE 4: st.chat_input instead of st.text_input -> looks and feels like a chat box
+    user_question = st.chat_input("Enter a question :")
+
+    if user_question:
+        # show the user's question immediately
+        with st.chat_message("user"):
+            st.write(user_question)
+        st.session_state.chat_history.append(("user", user_question))
+
+        match = vector_store.similarity_search(user_question)
+
+        llm = OllamaLLM(
+            temperature=0,
+            model="llama3.2:latest"
+        )
+
+        chain = load_qa_chain(llm, chain_type="stuff")
+        response = chain.run(input_documents=match, question=user_question)
+
+        # show the bot's answer
+        with st.chat_message("assistant"):
+            st.write(response)
+        st.session_state.chat_history.append(("assistant", response))
