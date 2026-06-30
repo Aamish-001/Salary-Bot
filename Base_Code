@@ -12,8 +12,7 @@ with st.sidebar:
     st.title("Documents Upload")
     file = st.file_uploader("Upload your documents here", type=["pdf", "docx", "txt", "xlsx"], accept_multiple_files=True)
 
-# CHANGE 1: this list will collect chunks from ALL uploaded files,
-# instead of only keeping the last file's chunks (that was a bug)
+# CHANGE 1: collect chunks from ALL uploaded files (original code only kept the last file)
 all_chunks = []
 
 #Extract text from uploaded files
@@ -53,10 +52,7 @@ if file:
             length_function=len
         )
         chunks = text_splitter.split_text(text)
-
-        # CHANGE 1 (continued): add this file's chunks to the big list
-        # instead of overwriting "chunks" every loop
-        all_chunks.extend(chunks)
+        all_chunks.extend(chunks)  # CHANGE 1 continued: add to big list instead of overwriting
 
 # Generating Embeddings
     try:
@@ -65,44 +61,61 @@ if file:
         st.error("Install free local embeddings with: pip install langchain-huggingface sentence-transformers")
         st.stop()
 
-    # CHANGE 2: only build the embeddings model and vector store ONCE,
-    # and save them in st.session_state so the app doesn't redo this
-    # slow step every single time you ask a question
+    # CHANGE 2: build embeddings only once, save in session_state so it doesn't redo this on every keypress
     if "vector_store" not in st.session_state:
         embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
         st.session_state.vector_store = FAISS.from_texts(all_chunks, embeddings)
 
     vector_store = st.session_state.vector_store
 
-    # CHANGE 3: keep a running chat history instead of just one Q and one A
+    # CHANGE 3: keep a running chat history
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
-    # show all previous messages like a real chat app
+    # show all previous messages
     for role, message in st.session_state.chat_history:
         with st.chat_message(role):
             st.write(message)
 
-    # CHANGE 4: st.chat_input instead of st.text_input -> looks and feels like a chat box
+    # CHANGE 4: chat-style input box
     user_question = st.chat_input("Enter a question :")
 
     if user_question:
-        # show the user's question immediately
         with st.chat_message("user"):
             st.write(user_question)
         st.session_state.chat_history.append(("user", user_question))
-
-        match = vector_store.similarity_search(user_question)
 
         llm = OllamaLLM(
             temperature=0,
             model="llama3.2:latest"
         )
 
-        chain = load_qa_chain(llm, chain_type="stuff")
-        response = chain.run(input_documents=match, question=user_question)
+        # CHANGE 5: build conversation history string so LLM knows what was said before
+        history_text = ""
+        for role, message in st.session_state.chat_history[:-1]:
+            label = "User" if role == "user" else "Assistant"
+            history_text += f"{label}: {message}\n"
 
-        # show the bot's answer
+        # CHANGE 6: for the document search, combine the LAST real question + current message.
+        # Problem before: "make it longer" was being searched in the documents,
+        # which pulled random unrelated chunks and confused the LLM.
+        # Fix: search using the last real question so we get the right document chunks.
+        past_user_messages = [m for role, m in st.session_state.chat_history[:-1] if role == "user"]
+        if past_user_messages:
+            search_query = past_user_messages[-1] + " " + user_question
+        else:
+            search_query = user_question
+
+        match = vector_store.similarity_search(search_query)
+
+        question_with_history = f"""Previous conversation:
+{history_text}
+Current question: {user_question}"""
+
+        chain = load_qa_chain(llm, chain_type="stuff")
+        response = chain.run(input_documents=match, question=question_with_history)
+
         with st.chat_message("assistant"):
             st.write(response)
         st.session_state.chat_history.append(("assistant", response))
+
